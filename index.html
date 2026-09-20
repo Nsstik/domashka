@@ -238,6 +238,26 @@ h1{font-family:var(--hand);font-weight:700;font-size:clamp(52px,9vw,76px);line-h
   *,*::before,*::after{transition:none !important;animation:none !important}
   .sticks .new{stroke-dashoffset:0}
 }
+
+/* sync & auth */
+.sync-btn .dot,.acct-status .dot{width:8px;height:8px;border-radius:50%;background:var(--pencil);flex:none}
+.sync-btn.synced .dot,.acct-status.synced .dot{background:var(--ink)}
+.sync-btn.syncing .dot,.sync-btn.loading .dot,.acct-status.syncing .dot{background:var(--ink);animation:pulse 1.1s ease-in-out infinite}
+.sync-btn.error,.acct-status.error{color:var(--red)}
+.sync-btn.error{border-color:var(--red)}
+.sync-btn.error .dot,.acct-status.error .dot{background:var(--red)}
+.sync-btn.signed-out{background:var(--ink);border-color:var(--ink);color:var(--on-ink)}
+.sync-btn.signed-out .dot{display:none}
+@keyframes pulse{50%{opacity:.25}}
+.acct-status{display:flex;align-items:center;gap:8px;margin:0 0 12px !important;font-size:14px}
+.auth-form{display:grid;gap:12px;margin-top:4px}
+.show-pw{display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--muted);cursor:pointer;justify-self:start}
+.show-pw input{width:18px;height:18px;margin:0;accent-color:var(--ink)}
+.form-msg{margin:0 !important;color:var(--red);font-size:14px}
+.form-msg.ok{color:var(--ink)}
+.btn.wide{width:100%;min-height:44px}
+.link{border:0;background:none;padding:2px 0;color:var(--ink);font-size:inherit;font-weight:500;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.auth-alt{margin-top:16px;font-size:14px;color:var(--muted);display:grid;gap:8px;justify-items:start}
 </style>
 </head>
 <body>
@@ -248,6 +268,7 @@ h1{font-family:var(--hand);font-weight:700;font-size:clamp(52px,9vw,76px);line-h
       <h1>Домашка</h1>
       <p id="summary" class="summary"></p>
       <div class="head-actions">
+        <button id="sync-btn" class="btn sync-btn" data-action="open-account" hidden></button>
         <button class="btn" data-action="open-stats">Итоги семестра</button>
         <button class="btn" data-action="open-backup">Резервная копия</button>
       </div>
@@ -261,17 +282,15 @@ h1{font-family:var(--hand);font-weight:700;font-size:clamp(52px,9vw,76px);line-h
     </section>
   </header>
   <main id="board" class="board"></main>
-  <footer class="foot">
-    <p>Список хранится только в этом браузере. Одногруппники по этой же ссылке ведут свои списки и твоих заданий не видят.</p>
-  </footer>
+  <footer class="foot"><p id="foot-text"></p></footer>
 </div>
 <div id="overlay" class="overlay" hidden></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-
+<script src="firebase-config.js"></script>
 <script>
 (function(){
 'use strict';
-var KEY='domashka.v1', PERSONAL='personal';
+var LOCAL_KEY='domashka.v1', PERSONAL='personal', TOMB_TTL=120*86400000, FB_VER='12.18.0';
 var MON=['янв','фев','мар','апр','мая','июн','июл','авг','сен','окт','ноя','дек'];
 var MON_FULL=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
 var WD=['вс','пн','вт','ср','чт','пт','сб'];
@@ -290,50 +309,100 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){retur
 function plural(n,a,b,c){n=Math.abs(n)%100;var n1=n%10;if(n>10&&n<20)return c;if(n1>1&&n1<5)return b;if(n1===1)return a;return c}
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,8)}
 function rnd(seed){var x=Math.sin(seed*999.13+7.7)*43758.5453;return x-Math.floor(x)}
+function now(){return Date.now()}
+function touch(x){x.updatedAt=Math.max(now(),(x.updatedAt||0)+1)}
+function byteLen(s){try{return new TextEncoder().encode(s).length}catch(e){return s.length*2}}
 
-/* ---------- storage ---------- */
+/* ---------- state ---------- */
 var storageOk=true;
 try{localStorage.setItem('__dz_t','1');localStorage.removeItem('__dz_t')}catch(e){storageOk=false}
+function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function lsSet(k,v){try{localStorage.setItem(k,v);return true}catch(e){return false}}
+function lsDel(k){try{localStorage.removeItem(k)}catch(e){}}
 
-function defaultState(){return {v:1,subjects:[],tasks:[],semesters:[],semesterStart:Date.now()}}
+function defaultState(){return {v:2,subjects:[],tasks:[],semesters:[],semesterStart:now(),metaAt:0,deleted:{tasks:{},subjects:{}}}}
+function validId(x){return x&&x.id!=null&&String(x.id).length<80}
 function normalize(s){
   var d=defaultState();
   if(!s||typeof s!=='object')return d;
-  var subjects=Array.isArray(s.subjects)?s.subjects.filter(function(x){return x&&x.id&&typeof x.name==='string'&&x.id!==PERSONAL}).map(function(x){return {id:String(x.id),name:x.name.slice(0,80)}}):[];
+  var t0=now(),del={tasks:{},subjects:{}};
+  if(s.deleted&&typeof s.deleted==='object'){
+    ['tasks','subjects'].forEach(function(k){
+      var src=s.deleted[k];
+      if(src&&typeof src==='object')Object.keys(src).sort().forEach(function(id){var ts=+src[id];if(ts&&t0-ts<TOMB_TTL)del[k][id]=ts});
+    });
+  }
+  var subjects=Array.isArray(s.subjects)?s.subjects.filter(function(x){return validId(x)&&typeof x.name==='string'&&String(x.id)!==PERSONAL}).map(function(x,i){
+    return {id:String(x.id),name:x.name.slice(0,80),pos:(typeof x.pos==='number'&&isFinite(x.pos))?x.pos:i,updatedAt:+x.updatedAt||0};
+  }):[];
+  subjects.sort(function(a,b){return (a.pos-b.pos)||(a.id<b.id?-1:a.id>b.id?1:0)});
   var ids={};subjects.forEach(function(x){ids[x.id]=1});ids[PERSONAL]=1;
-  var tasks=Array.isArray(s.tasks)?s.tasks.filter(function(t){return t&&t.id&&typeof t.text==='string'}).map(function(t){
+  var tasks=Array.isArray(s.tasks)?s.tasks.filter(function(t){return validId(t)&&typeof t.text==='string'}).map(function(t){
     var done=!!t.done;
     return {id:String(t.id),subjectId:ids[t.subjectId]?String(t.subjectId):PERSONAL,text:t.text.slice(0,500),
       note:typeof t.note==='string'?t.note:'',due:/^\d{4}-\d{2}-\d{2}$/.test(t.due||'')?t.due:'',
-      priority:(t.priority==='high'||t.priority==='low')?t.priority:'',done:done,doneAt:done?(+t.doneAt||Date.now()):null,
-      createdAt:+t.createdAt||Date.now()};
+      priority:(t.priority==='high'||t.priority==='low')?t.priority:'',done:done,doneAt:done?(+t.doneAt||now()):null,
+      createdAt:+t.createdAt||now(),updatedAt:+t.updatedAt||0};
   }):[];
-  var semesters=Array.isArray(s.semesters)?s.semesters.filter(function(x){return x&&typeof x.total==='number'}):[];
-  return {v:1,subjects:subjects,tasks:tasks,semesters:semesters,semesterStart:+s.semesterStart||Date.now()};
+  tasks.sort(function(a,b){return a.id<b.id?-1:a.id>b.id?1:0});
+  var semesters=Array.isArray(s.semesters)?s.semesters.filter(function(x){return x&&typeof x.total==='number'}).map(function(x){
+    return {id:String(x.id||('s'+(+x.end||0)+'_'+x.total)),label:String(x.label||'Семестр'),start:+x.start||0,end:+x.end||0,total:x.total,
+      bySubject:Array.isArray(x.bySubject)?x.bySubject.filter(function(b){return b&&typeof b.name==='string'}).map(function(b){return {name:b.name,n:+b.n||0}}):[]};
+  }):[];
+  semesters.sort(function(a,b){return (b.end-a.end)||(a.id<b.id?-1:a.id>b.id?1:0)});
+  return {v:2,subjects:subjects,tasks:tasks,semesters:semesters,semesterStart:+s.semesterStart||d.semesterStart,metaAt:+s.metaAt||0,deleted:del};
 }
-function load(){
-  if(!storageOk)return defaultState();
-  try{var raw=localStorage.getItem(KEY);if(!raw)return defaultState();return normalize(JSON.parse(raw))}
-  catch(e){return defaultState()}
+function mergeStates(a,b){
+  var del={tasks:{},subjects:{}};
+  ['tasks','subjects'].forEach(function(k){
+    [a.deleted[k],b.deleted[k]].forEach(function(src){Object.keys(src).forEach(function(id){if(!(del[k][id]>=src[id]))del[k][id]=src[id]})});
+  });
+  function pick(la,lb,tomb){
+    var m={};
+    la.concat(lb).forEach(function(x){
+      var c=m[x.id];
+      if(!c||x.updatedAt>c.updatedAt||(x.updatedAt===c.updatedAt&&JSON.stringify(x)>JSON.stringify(c)))m[x.id]=x;
+    });
+    var out=[];
+    Object.keys(m).forEach(function(id){
+      var x=m[id];
+      if(tomb[id]!=null&&tomb[id]>=x.updatedAt)return;
+      if(tomb[id]!=null)delete tomb[id];
+      out.push(x);
+    });
+    return out;
+  }
+  var subjects=pick(a.subjects,b.subjects,del.subjects),tasks=pick(a.tasks,b.tasks,del.tasks);
+  var sem={};a.semesters.concat(b.semesters).forEach(function(x){sem[x.id]=x});
+  var meta=a.metaAt>b.metaAt?a:b.metaAt>a.metaAt?b:(a.semesterStart<=b.semesterStart?a:b);
+  return normalize({subjects:subjects,tasks:tasks,semesters:Object.keys(sem).map(function(k){return sem[k]}),
+    semesterStart:meta.semesterStart,metaAt:meta.metaAt,deleted:del});
 }
-function save(){
-  clearTimeout(saveTimer);
-  if(!storageOk)return;
-  try{localStorage.setItem(KEY,JSON.stringify(state))}
-  catch(e){storageOk=false;renderBanner()}
+function hasContent(s){return !!(s&&(s.subjects.length||s.tasks.length))}
+function load(key){
+  var raw=lsGet(key);
+  if(!raw)return defaultState();
+  try{return normalize(JSON.parse(raw))}catch(e){return defaultState()}
 }
-var saveTimer;
-function saveSoon(){clearTimeout(saveTimer);saveTimer=setTimeout(save,350)}
 
-var state=load();
-if(storageOk){try{if(!localStorage.getItem(KEY))save()}catch(e){}}
+var currentKey=LOCAL_KEY;
+var state=load(LOCAL_KEY);
+var saveTimer;
+function persistLocal(){
+  if(!storageOk)return;
+  if(!lsSet(currentKey,JSON.stringify(state))){storageOk=false;renderBanner()}
+}
+function save(){clearTimeout(saveTimer);persistLocal();schedulePush()}
+function saveSoon(){clearTimeout(saveTimer);saveTimer=setTimeout(save,400)}
+if(storageOk&&!lsGet(LOCAL_KEY))persistLocal();
+
 var ui={editing:null,openDone:{},menu:null,renaming:null,addingSubject:false,focusAdd:null,focusSel:null,animateTally:false};
 var busy={};
 
 /* ---------- helpers ---------- */
 function findTask(id){for(var i=0;i<state.tasks.length;i++)if(state.tasks[i].id===id)return state.tasks[i];return null}
+function findSubject(id){for(var i=0;i<state.subjects.length;i++)if(state.subjects[i].id===id)return state.subjects[i];return null}
 function allSubjects(){return state.subjects.concat([{id:PERSONAL,name:'Мои дела'}])}
-function subjectName(id){var s=allSubjects().filter(function(x){return x.id===id})[0];return s?s.name:''}
 var PR={high:0,'':1,low:2};
 function sortActive(arr){return arr.slice().sort(function(a,b){
   return (PR[a.priority]-PR[b.priority])||(a.due||'9999').localeCompare(b.due||'9999')||(a.createdAt-b.createdAt)})}
@@ -371,7 +440,14 @@ function tallyHTML(count,animate){
 /* ---------- render ---------- */
 var board=$('#board');
 function renderBanner(){
-  $('#banner').innerHTML=storageOk?'':'<div class="banner">Браузер не даёт этой странице сохранять данные (так бывает в режиме инкогнито). Изменения пропадут после закрытия, поэтому сохрани резервную копию.</div>';
+  $('#banner').innerHTML=(storageOk||(cloud&&cloud.user))?'':'<div class="banner">Браузер не даёт этой странице сохранять данные (так бывает в режиме инкогнито). Изменения пропадут после закрытия, поэтому войди в аккаунт или сохрани резервную копию.</div>';
+}
+function renderFooter(){
+  var t;
+  if(!cloud.enabled)t='Список хранится только в этом браузере. Одногруппники по этой же ссылке ведут свои списки и твоих заданий не видят.';
+  else if(cloud.user)t='Список хранится в аккаунте и одинаковый на всех устройствах, где выполнен вход. Другие пользователи его не видят.';
+  else t='Без входа список хранится только в этом браузере. Войди в аккаунт, чтобы видеть один и тот же список на телефоне и компьютере. Чужие списки никому не видны.';
+  $('#foot-text').textContent=t;
 }
 function renderHeader(){
   var active=state.tasks.filter(function(t){return !t.done});
@@ -383,7 +459,8 @@ function renderHeader(){
   var high=0,soon=0,over=0;
   active.forEach(function(t){if(t.priority==='high')high++;if(t.due){var d=dueInfo(t.due).diff;if(d<0)over++;else if(d<=1)soon++}});
   var s;
-  if(!state.tasks.length)s='Добавь дисциплины из расписания, а в них задания. Всё будет лежать по полочкам.';
+  if(cloud.user&&cloud.waitingFirst&&!state.tasks.length&&!state.subjects.length)s='Загружаю список из аккаунта…';
+  else if(!state.tasks.length)s='Добавь дисциплины из расписания, а в них задания. Всё будет лежать по полочкам.';
   else if(!active.length)s='Все задания сделаны. Можно выдохнуть.';
   else{
     s='Осталось <b>'+active.length+' '+plural(active.length,'задание','задания','заданий')+'</b>';
@@ -393,7 +470,7 @@ function renderHeader(){
     if(over)s+=' Просрочено: <b class="hot">'+over+'</b>.';
   }
   $('#summary').innerHTML=s;
-  renderBanner();
+  renderBanner();renderFooter();renderSync();
 }
 function taskHTML(t){
   var ed=ui.editing===t.id,cls=['task'];
@@ -464,13 +541,21 @@ function newSubjectHTML(){
     '<input id="new-subject" maxlength="80" autocomplete="off" placeholder="Например, Матанализ" aria-label="Название дисциплины">'+
     '<div class="new-foot">'+(first?'':'<button type="button" class="btn btn-ghost" data-action="add-subject-cancel">Готово</button>')+'<button class="btn btn-primary">Добавить</button></div></form>';
 }
+function focusKey(el){
+  if(!el||!el.closest||!board.contains(el))return null;
+  if(el.dataset&&el.dataset.field&&el.dataset.id)return '[data-field="'+el.dataset.field+'"][data-id="'+el.dataset.id+'"]';
+  if(el.id==='new-subject')return '#new-subject';
+  var f=el.closest('form[data-form="add-task"]');if(f&&el.tagName==='INPUT')return 'form[data-form="add-task"][data-sid="'+f.dataset.sid+'"] input';
+  f=el.closest('form[data-form="rename"]');if(f&&el.tagName==='INPUT')return 'form[data-form="rename"][data-sid="'+f.dataset.sid+'"] input';
+  return null;
+}
 function render(){
   var keep={};
-  document.querySelectorAll('form[data-form="add-task"]').forEach(function(f){var v=f.querySelector('input').value;if(v)keep[f.dataset.sid]=v});
-  var ae=document.activeElement,activeAdd=null;
-  if(ae&&ae.closest){var af=ae.closest('form[data-form="add-task"]');if(af&&ae.tagName==='INPUT')activeAdd=af.dataset.sid}
-  var newSubjVal=$('#new-subject')?$('#new-subject').value:'';
-  var newSubjFocused=ae&&ae.id==='new-subject';
+  board.querySelectorAll('form[data-form="add-task"]').forEach(function(f){var v=f.querySelector('input').value;if(v)keep[f.dataset.sid]=v});
+  var ns=$('#new-subject'),newSubjVal=ns?ns.value:'';
+  var rn=board.querySelector('form[data-form="rename"] input'),renameVal=rn?rn.value:null;
+  var ae=document.activeElement,fk=focusKey(ae),sel=null;
+  if(fk&&ae&&typeof ae.selectionStart==='number'){try{sel=[ae.selectionStart,ae.selectionEnd]}catch(e){}}
   renderHeader();
   var html=state.subjects.map(sheetHTML);
   html.push(newSubjectHTML());
@@ -478,11 +563,16 @@ function render(){
   board.innerHTML=html.join('');
   Object.keys(keep).forEach(function(sid){var inp=board.querySelector('form[data-form="add-task"][data-sid="'+sid+'"] input');if(inp)inp.value=keep[sid]});
   if($('#new-subject')&&newSubjVal)$('#new-subject').value=newSubjVal;
-  var fs=ui.focusAdd||activeAdd;
-  if(fs){var inp=board.querySelector('form[data-form="add-task"][data-sid="'+fs+'"] input');if(inp)inp.focus({preventScroll:!ui.focusAdd})}
-  else if(newSubjFocused&&$('#new-subject'))$('#new-subject').focus({preventScroll:true});
-  ui.focusAdd=null;
-  if(ui.focusSel){var el=document.querySelector(ui.focusSel);if(el){el.focus();if(el.select)el.select()}ui.focusSel=null}
+  var rn2=board.querySelector('form[data-form="rename"] input');if(rn2&&renameVal!=null)rn2.value=renameVal;
+  if(ui.focusAdd){
+    var inp=board.querySelector('form[data-form="add-task"][data-sid="'+ui.focusAdd+'"] input');if(inp)inp.focus();
+  }else if(ui.focusSel){
+    var el=document.querySelector(ui.focusSel);if(el){el.focus();if(el.select)el.select()}
+  }else if(fk){
+    var back=board.querySelector(fk);
+    if(back){back.focus({preventScroll:true});if(sel&&typeof back.setSelectionRange==='function'){try{back.setSelectionRange(sel[0],sel[1])}catch(e){}}}
+  }
+  ui.focusAdd=null;ui.focusSel=null;
 }
 
 /* ---------- toast & modal ---------- */
@@ -494,15 +584,17 @@ function toast(msg,action){
   if(action)toastEl.querySelector('button').onclick=function(){action.fn();hideToast()};
   clearTimeout(toastTimer);toastTimer=setTimeout(hideToast,action?6000:3500);
 }
-var overlay=$('#overlay'),lastFocus=null,confirmResolver=null;
-function openModal(html){
+var overlay=$('#overlay'),lastFocus=null,confirmResolver=null,modalKind=null;
+function openModal(html,kind){
+  if(confirmResolver){var r=confirmResolver;confirmResolver=null;r(false)}
   if(overlay.hidden)lastFocus=document.activeElement;
+  modalKind=kind||null;
   overlay.innerHTML='<div class="modal" role="dialog" aria-modal="true">'+html+'</div>';
   overlay.hidden=false;
   var f=overlay.querySelector('[data-autofocus]')||overlay.querySelector('button');if(f)f.focus();
 }
 function closeModal(){
-  overlay.hidden=true;overlay.innerHTML='';
+  overlay.hidden=true;overlay.innerHTML='';modalKind=null;
   if(lastFocus&&document.body.contains(lastFocus))lastFocus.focus();
   lastFocus=null;
 }
@@ -511,11 +603,12 @@ function dismissModal(){
   closeModal();
 }
 function askConfirm(o){
-  return new Promise(function(res){
+  var p=new Promise(function(res){
     openModal('<p class="confirm-title">'+esc(o.title)+'</p><p class="muted">'+esc(o.text)+'</p>'+
-      '<div class="modal-foot"><button class="btn" data-action="confirm-no">Отмена</button><button class="btn '+(o.danger?'btn-danger':'btn-primary')+'" data-action="confirm-yes" data-autofocus>'+esc(o.ok)+'</button></div>');
+      '<div class="modal-foot"><button class="btn" data-action="confirm-no">'+esc(o.cancel||'Отмена')+'</button><button class="btn '+(o.danger?'btn-danger':'btn-primary')+'" data-action="confirm-yes" data-autofocus>'+esc(o.ok)+'</button></div>','confirm');
     confirmResolver=res;
   });
+  return p;
 }
 
 /* ---------- stats ---------- */
@@ -531,39 +624,41 @@ function openStats(){
     h+='<ul class="bars">'+by.map(function(x){return '<li><span>'+esc(x.name)+'</span><span>'+x.n+'</span><span class="bar"><i style="width:'+Math.max(4,Math.round(x.n/max*100))+'%"></i></span></li>'}).join('')+'</ul>';
   }
   if(state.semesters.length){
-    h+='<h3>Прошлые семестры</h3><ul class="past">'+state.semesters.map(function(s){return '<li><span>'+esc(s.label||'Семестр')+'</span><span>'+s.total+' '+plural(s.total,'задание','задания','заданий')+'</span></li>'}).join('')+'</ul>';
+    h+='<h3>Прошлые семестры</h3><ul class="past">'+state.semesters.map(function(s){return '<li><span>'+esc(s.label)+'</span><span>'+s.total+' '+plural(s.total,'задание','задания','заданий')+'</span></li>'}).join('')+'</ul>';
   }
   h+='<div class="end-sem"><p>Когда семестр закончится, заверши его: итоги сохранятся в архиве, сделанные задания уберутся, а счётчик начнётся заново. Дисциплины и несделанные задания останутся.</p>'+
     '<button class="btn" data-action="end-semester"'+(done.length?'':' disabled')+'>Завершить семестр</button></div>'+
     '<div class="modal-foot"><button class="btn btn-primary" data-action="close-modal" data-autofocus>Закрыть</button></div>';
-  openModal(h);
+  openModal(h,'stats');
 }
 function endSemester(){
   var done=state.tasks.filter(function(t){return t.done});
   if(!done.length)return;
   askConfirm({title:'Завершить семестр?',text:'Итог «'+semLabel(state.semesterStart)+': '+done.length+' '+plural(done.length,'задание','задания','заданий')+'» сохранится в архиве, а сделанные задания уберутся из списков.',ok:'Завершить'}).then(function(ok){
     if(!ok){openStats();return}
-    var by=allSubjects().map(function(s){return {name:s.name,n:done.filter(function(t){return t.subjectId===s.id}).length}}).filter(function(x){return x.n});
-    state.semesters.unshift({id:uid(),label:semLabel(state.semesterStart),start:state.semesterStart,end:Date.now(),total:done.length,bySubject:by});
+    var cur=state.tasks.filter(function(t){return t.done}),t0=now();
+    var by=allSubjects().map(function(s){return {name:s.name,n:cur.filter(function(t){return t.subjectId===s.id}).length}}).filter(function(x){return x.n});
+    state.semesters.unshift({id:uid(),label:semLabel(state.semesterStart),start:state.semesterStart,end:t0,total:cur.length,bySubject:by});
+    cur.forEach(function(t){state.deleted.tasks[t.id]=t0});
     state.tasks=state.tasks.filter(function(t){return !t.done});
-    state.semesterStart=Date.now();ui.openDone={};
+    state.semesterStart=t0;state.metaAt=t0;ui.openDone={};
     save();render();openStats();toast('Семестр сохранён в архиве');
   });
 }
 
 /* ---------- backup ---------- */
-var downloadsCap=null;
-function exportCode(){return JSON.stringify({app:'domashka',v:1,exportedAt:new Date().toISOString(),data:state})}
+function exportCode(){return JSON.stringify({app:'domashka',v:2,exportedAt:new Date().toISOString(),data:state})}
 function openBackup(){
   openModal('<h2>Резервная копия</h2>'+
-    '<p>Задания хранятся только в этом браузере. Если очистить его данные или открыть сайт на другом устройстве, списка там не будет. Сохрани копию, чтобы ничего не потерять или перенести список на телефон.</p>'+
-    '<div class="bk-actions"><button class="btn btn-primary" id="dl-btn" data-action="download">Скачать файл копии</button><button class="btn" data-action="copy">Скопировать код копии</button></div>'+
+    (cloud.user?'<p>Список уже хранится в аккаунте, но копия на всякий случай не помешает.</p>'
+      :'<p>Без входа в аккаунт задания хранятся только в этом браузере. Если очистить его данные, список пропадёт. Сохрани копию, чтобы ничего не потерять или перенести список на другое устройство.</p>')+
+    '<div class="bk-actions"><button class="btn btn-primary" data-action="download">Скачать файл копии</button><button class="btn" data-action="copy">Скопировать код копии</button></div>'+
     '<textarea id="export-code" class="code" rows="3" readonly aria-label="Код копии">'+esc(exportCode())+'</textarea>'+
-    '<h3>Восстановить из копии</h3><p class="muted">Вставь код или выбери сохранённый файл. Текущий список в этом браузере заменится.</p>'+
+    '<h3>Восстановить из копии</h3><p class="muted">Вставь код или выбери сохранённый файл. Текущий список заменится.</p>'+
     '<textarea id="import-code" class="code" rows="3" placeholder="Вставь код копии" aria-label="Код копии для восстановления"></textarea>'+
     '<input type="file" id="import-file" accept=".json,application/json,text/plain" hidden>'+
     '<div class="bk-actions"><button class="btn" data-action="pick-file">Выбрать файл</button><button class="btn btn-primary" data-action="restore">Восстановить</button></div>'+
-    '<div class="modal-foot"><button class="btn" data-action="close-modal">Закрыть</button></div>');
+    '<div class="modal-foot"><button class="btn" data-action="close-modal">Закрыть</button></div>','backup');
 }
 function downloadFile(){
   try{
@@ -592,29 +687,289 @@ function restore(){
   var data=obj&&obj.app==='domashka'?obj.data:obj;
   if(!data||!Array.isArray(data.subjects)||!Array.isArray(data.tasks)){toast('Это не похоже на копию Домашки.');return}
   var ns=data.subjects.length,nt=data.tasks.length;
-  askConfirm({title:'Заменить текущий список?',text:'В копии '+ns+' '+plural(ns,'дисциплина','дисциплины','дисциплин')+' и '+nt+' '+plural(nt,'задание','задания','заданий')+'. То, что сейчас в этом браузере, пропадёт.',ok:'Заменить',danger:true}).then(function(ok){
+  askConfirm({title:'Заменить текущий список?',text:'В копии '+ns+' '+plural(ns,'дисциплина','дисциплины','дисциплин')+' и '+nt+' '+plural(nt,'задание','задания','заданий')+'. То, что сейчас в списке, пропадёт.',ok:'Заменить',danger:true}).then(function(ok){
     if(!ok){openBackup();return}
-    state=normalize(data);ui.editing=null;ui.openDone={};ui.menu=null;
+    var imp=normalize(data),t=now()+1;
+    var del={tasks:{},subjects:{}};
+    Object.keys(state.deleted.tasks).forEach(function(k){del.tasks[k]=state.deleted.tasks[k]});
+    Object.keys(state.deleted.subjects).forEach(function(k){del.subjects[k]=state.deleted.subjects[k]});
+    state.tasks.forEach(function(x){del.tasks[x.id]=t-1});
+    state.subjects.forEach(function(x){del.subjects[x.id]=t-1});
+    imp.tasks.forEach(function(x){x.updatedAt=t;delete del.tasks[x.id]});
+    imp.subjects.forEach(function(x){x.updatedAt=t;delete del.subjects[x.id]});
+    imp.deleted=del;imp.metaAt=t;
+    state=normalize(imp);ui.editing=null;ui.openDone={};ui.menu=null;
     save();render();toast('Копия восстановлена');
   });
 }
 
+/* ---------- cloud sync ---------- */
+var CFG=window.DOMASHKA_FIREBASE||(typeof firebaseConfig!=='undefined'?firebaseConfig:null); // eslint-disable-line no-undef
+if(!CFG||!CFG.apiKey||!CFG.projectId)CFG=null;
+var cloud={enabled:!!CFG,api:null,user:null,status:CFG?'loading':'off',err:'',unsub:null,pushTimer:null,retryTimer:null,
+  pushing:false,dirty:false,waitingFirst:false,pendingGuest:null,loadFailed:false};
+var STATUS_TEXT={loading:'Подключаю облако…','signed-out':'Войти для синхронизации',syncing:'Синхронизация…',
+  synced:'Синхронизировано',offline:'Нет сети, сохранено на устройстве',error:'Ошибка синхронизации'};
+function renderSync(){
+  var b=$('#sync-btn');if(!b)return;
+  b.hidden=!cloud.enabled;
+  b.className='btn sync-btn '+cloud.status;
+  b.innerHTML='<span class="dot" aria-hidden="true"></span><span>'+esc(STATUS_TEXT[cloud.status]||'')+'</span>';
+  var st=$('#acct-status');
+  if(st)st.innerHTML='<span class="dot" aria-hidden="true"></span><span>'+esc(STATUS_TEXT[cloud.status]||'')+(cloud.status==='error'&&cloud.err?'. '+esc(cloud.err):'')+'</span>';
+  if(st)st.className='acct-status '+cloud.status;
+}
+function setStatus(s,err){cloud.status=s;cloud.err=err||'';renderSync()}
+function parseRemote(data){
+  if(!data||typeof data.data!=='string')return null;
+  try{return normalize(JSON.parse(data.data))}catch(e){return null}
+}
+function loadFirebase(){
+  var base='https://www.gstatic.com/firebasejs/'+FB_VER+'/';
+  var imp=new Function('u','return import(u)');
+  return Promise.all([imp(base+'firebase-app.js'),imp(base+'firebase-auth.js'),imp(base+'firebase-firestore.js')]).then(function(m){
+    var appM=m[0],authM=m[1],fsM=m[2];
+    var app=appM.initializeApp(CFG),auth=authM.getAuth(app),db=fsM.getFirestore(app);
+    try{auth.languageCode='ru'}catch(e){}
+    return {
+      onAuth:function(cb){return authM.onAuthStateChanged(auth,cb)},
+      signIn:function(e,p){return authM.signInWithEmailAndPassword(auth,e,p)},
+      signUp:function(e,p){return authM.createUserWithEmailAndPassword(auth,e,p)},
+      signOut:function(){return authM.signOut(auth)},
+      reset:function(e){return authM.sendPasswordResetEmail(auth,e)},
+      watch:function(id,next,fail){
+        return fsM.onSnapshot(fsM.doc(db,'users',id),{includeMetadataChanges:false},function(snap){
+          next(snap.exists()?snap.data():null,snap.metadata.fromCache);
+        },fail);
+      },
+      push:function(id,mergeFn){
+        var ref=fsM.doc(db,'users',id);
+        return fsM.runTransaction(db,function(tx){
+          return tx.get(ref).then(function(snap){
+            var out=mergeFn(snap.exists()?snap.data():null);
+            if(out.write)tx.set(ref,{data:out.data,v:2,updatedAt:fsM.serverTimestamp()});
+            return out;
+          });
+        });
+      }
+    };
+  });
+}
+function initCloud(){
+  if(!cloud.enabled){renderSync();return}
+  setStatus('loading');
+  var p=window.__DOMASHKA_TEST_FB?Promise.resolve(window.__DOMASHKA_TEST_FB):loadFirebase();
+  p.then(function(api){
+    cloud.api=api;cloud.loadFailed=false;
+    api.onAuth(function(user){if(user)onSignedIn(user);else onSignedOut()});
+  },function(){
+    cloud.loadFailed=true;
+    setStatus(navigator.onLine===false?'offline':'error','Не удалось подключиться к облаку');
+  });
+}
+function onSignedIn(user){
+  if(cloud.user&&cloud.user.uid===user.uid)return;
+  if(cloud.user)onSignedOut();
+  var guest=currentKey===LOCAL_KEY?state:load(LOCAL_KEY);
+  cloud.user={uid:user.uid,email:user.email||''};
+  currentKey='domashka.u.'+user.uid;
+  state=load(currentKey);
+  cloud.pendingGuest=(hasContent(guest)&&!lsGet('domashka.guestAsked.'+user.uid))?guest:null;
+  cloud.waitingFirst=true;cloud.dirty=false;
+  ui.editing=null;ui.menu=null;ui.renaming=null;ui.openDone={};
+  setStatus('syncing');render();
+  var myUid=user.uid;
+  cloud.unsub=cloud.api.watch(myUid,function(data,fromCache){
+    if(!cloud.user||cloud.user.uid!==myUid)return;
+    if(fromCache){if(cloud.status!=='syncing'||!navigator.onLine)setStatus('offline');return}
+    onRemote(data);
+  },function(err){
+    if(!cloud.user||cloud.user.uid!==myUid)return;
+    var code=err&&err.code||'';
+    setStatus('error',code==='permission-denied'?'База не пускает. Проверь правила доступа в Firebase':'Нет связи с облаком');
+  });
+}
+function onRemote(data){
+  var remote=parseRemote(data);
+  var before=JSON.stringify(state);
+  if(remote)state=mergeStates(state,remote);
+  var after=JSON.stringify(state);
+  if(after!==before){persistLocal();render()}
+  if(cloud.waitingFirst){
+    cloud.waitingFirst=false;
+    if(after===before)renderHeader();
+    if(cloud.pendingGuest)askGuestImport();
+  }
+  if(!remote||JSON.stringify(remote)!==after)schedulePush(0);
+  else if(!cloud.dirty&&!cloud.pushing)setStatus('synced');
+}
+function askGuestImport(){
+  var g=cloud.pendingGuest,u=cloud.user;cloud.pendingGuest=null;
+  if(!g||!u)return;
+  var ns=g.subjects.length,nt=g.tasks.length;
+  askConfirm({title:'Добавить список с этого устройства?',
+    text:'Здесь есть список без аккаунта: '+ns+' '+plural(ns,'дисциплина','дисциплины','дисциплин')+' и '+nt+' '+plural(nt,'задание','задания','заданий')+'. Если добавить, он объединится с тем, что уже есть в аккаунте.',
+    ok:'Добавить',cancel:'Не добавлять'}).then(function(ok){
+    lsSet('domashka.guestAsked.'+u.uid,'1');
+    if(!ok||!cloud.user||cloud.user.uid!==u.uid)return;
+    state=mergeStates(state,g);
+    lsDel(LOCAL_KEY);
+    save();render();toast('Список добавлен в аккаунт');
+  });
+}
+function schedulePush(delay){
+  if(!cloud.user||!cloud.api)return;
+  cloud.dirty=true;
+  clearTimeout(cloud.pushTimer);
+  cloud.pushTimer=setTimeout(pushNow,delay==null?900:delay);
+  if(cloud.status!=='offline'&&cloud.status!=='error')setStatus('syncing');
+}
+function pushNow(){
+  if(!cloud.user||!cloud.api)return;
+  if(cloud.pushing){cloud.dirty=true;return}
+  clearTimeout(cloud.pushTimer);
+  cloud.pushing=true;cloud.dirty=false;
+  var myUid=cloud.user.uid;
+  if(cloud.status!=='offline')setStatus('syncing');
+  cloud.api.push(myUid,function(data){
+    var remote=parseRemote(data);
+    var merged=remote?mergeStates(state,remote):normalize(state);
+    var s=JSON.stringify(merged);
+    if(byteLen(s)>900000){var e=new Error('too big');e.code='too-big';throw e}
+    return {write:!remote||s!==JSON.stringify(remote),data:s,merged:merged};
+  }).then(function(out){
+    cloud.pushing=false;
+    if(!cloud.user||cloud.user.uid!==myUid)return;
+    var before=JSON.stringify(state);
+    state=mergeStates(state,out.merged);
+    if(JSON.stringify(state)!==before){persistLocal();render()}
+    if(cloud.dirty)schedulePush(300);else setStatus('synced');
+  },function(err){
+    cloud.pushing=false;cloud.dirty=true;
+    if(!cloud.user||cloud.user.uid!==myUid)return;
+    var code=err&&err.code||'';
+    if(code==='too-big')setStatus('error','Список слишком большой для облака. Заверши семестр, чтобы освободить место');
+    else if(code==='permission-denied')setStatus('error','База не пускает. Проверь правила доступа в Firebase');
+    else if(navigator.onLine===false||code==='unavailable'||code==='deadline-exceeded')setStatus('offline');
+    else setStatus('error','Попробую ещё раз через несколько секунд');
+    clearTimeout(cloud.retryTimer);
+    cloud.retryTimer=setTimeout(function(){if(cloud.dirty)pushNow()},15000);
+  });
+}
+function onSignedOut(){
+  if(!cloud.user){if(cloud.enabled&&cloud.api)setStatus('signed-out');return}
+  var u=cloud.user;
+  if(cloud.unsub){try{cloud.unsub()}catch(e){}}
+  cloud.unsub=null;cloud.user=null;cloud.dirty=false;cloud.pushing=false;cloud.waitingFirst=false;cloud.pendingGuest=null;
+  clearTimeout(cloud.pushTimer);clearTimeout(cloud.retryTimer);
+  lsDel('domashka.u.'+u.uid);
+  currentKey=LOCAL_KEY;state=load(LOCAL_KEY);
+  ui.editing=null;ui.menu=null;ui.renaming=null;ui.openDone={};
+  setStatus('signed-out');render();
+}
+var AUTH_ERR={
+  'auth/invalid-email':'Проверь адрес почты: в нём ошибка.',
+  'auth/missing-email':'Впиши адрес почты.',
+  'auth/missing-password':'Впиши пароль.',
+  'auth/weak-password':'Пароль должен быть не короче 6 символов.',
+  'auth/email-already-in-use':'Эта почта уже зарегистрирована. Попробуй войти.',
+  'auth/invalid-credential':'Неверная почта или пароль.',
+  'auth/invalid-login-credentials':'Неверная почта или пароль.',
+  'auth/wrong-password':'Неверная почта или пароль.',
+  'auth/user-not-found':'Неверная почта или пароль.',
+  'auth/user-disabled':'Этот аккаунт отключён.',
+  'auth/too-many-requests':'Слишком много попыток. Подожди пару минут и попробуй снова.',
+  'auth/network-request-failed':'Нет связи с интернетом.',
+  'auth/operation-not-allowed':'Вход по почте не включён в настройках Firebase.',
+  'auth/unauthorized-domain':'Этот адрес сайта не добавлен в разрешённые домены Firebase.',
+  'auth/unauthorized-continue-uri':'Этот адрес сайта не добавлен в разрешённые домены Firebase.'
+};
+function authErrText(err){var c=err&&err.code||'';return AUTH_ERR[c]||('Не получилось'+(c?' ('+c+')':'')+'. Попробуй ещё раз.')}
+var authEmail='';
+function openAuth(mode){
+  mode=mode==='up'?'up':'in';
+  openModal('<h2>'+(mode==='up'?'Регистрация':'Вход')+'</h2>'+
+    '<p class="muted">С аккаунтом список одинаковый на телефоне и компьютере. Другие пользователи его не видят.</p>'+
+    '<form data-form="auth" data-mode="'+mode+'" class="auth-form" novalidate>'+
+      '<label class="fld"><span>Почта</span><input type="email" name="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" value="'+esc(authEmail)+'" data-autofocus></label>'+
+      '<label class="fld"><span>Пароль'+(mode==='up'?', не короче 6 символов':'')+'</span><input type="password" name="password" autocomplete="'+(mode==='up'?'new-password':'current-password')+'"></label>'+
+      '<label class="show-pw"><input type="checkbox" data-toggle-pw> Показать пароль</label>'+
+      '<p class="form-msg" role="alert" hidden></p>'+
+      '<button class="btn btn-primary wide" type="submit">'+(mode==='up'?'Создать аккаунт':'Войти')+'</button>'+
+    '</form>'+
+    '<div class="auth-alt">'+(mode==='up'
+      ?'<span>Уже есть аккаунт? <button type="button" class="link" data-action="auth-mode" data-mode="in">Войти</button></span>'
+      :'<span>Нет аккаунта? <button type="button" class="link" data-action="auth-mode" data-mode="up">Зарегистрироваться</button></span><button type="button" class="link" data-action="auth-reset">Не помню пароль</button>')+'</div>'+
+    '<div class="modal-foot"><button class="btn" data-action="close-modal">Закрыть</button></div>','auth');
+}
+function openAccount(){
+  if(!cloud.user){openAuth('in');return}
+  openModal('<h2>Аккаунт</h2><p>Вход выполнен: <b>'+esc(cloud.user.email)+'</b></p>'+
+    '<p id="acct-status" class="acct-status"></p>'+
+    '<p class="muted">Список синхронизируется между всеми устройствами, где выполнен вход в этот аккаунт. Изменения без интернета сохраняются на устройстве и отправятся, когда связь появится.</p>'+
+    '<div class="bk-actions"><button class="btn" data-action="sync-now">Синхронизировать сейчас</button><button class="btn btn-ghost danger" data-action="sign-out">Выйти из аккаунта</button></div>'+
+    '<div class="modal-foot"><button class="btn btn-primary" data-action="close-modal" data-autofocus>Закрыть</button></div>','account');
+  renderSync();
+}
+function authMsg(text,ok){
+  var m=overlay.querySelector('.form-msg');if(!m)return;
+  m.textContent=text;m.hidden=!text;m.className='form-msg'+(ok?' ok':'');
+}
+function submitAuth(f){
+  if(!cloud.api){authMsg('Облако ещё не подключилось. Проверь интернет и попробуй снова.');return}
+  var email=f.querySelector('[name=email]').value.trim(),pw=f.querySelector('[name=password]').value,mode=f.dataset.mode;
+  authEmail=email;
+  if(!email){authMsg('Впиши адрес почты.');return}
+  if(!pw){authMsg('Впиши пароль.');return}
+  if(mode==='up'&&pw.length<6){authMsg('Пароль должен быть не короче 6 символов.');return}
+  var btn=f.querySelector('button[type=submit]'),label=btn.textContent;
+  btn.disabled=true;btn.textContent=mode==='up'?'Создаю аккаунт…':'Вхожу…';authMsg('');
+  (mode==='up'?cloud.api.signUp(email,pw):cloud.api.signIn(email,pw)).then(function(){
+    if(modalKind==='auth')closeModal();
+    toast(mode==='up'?'Аккаунт создан, список синхронизируется':'Вход выполнен');
+  },function(err){
+    btn.disabled=false;btn.textContent=label;authMsg(authErrText(err));
+  });
+}
+function sendReset(){
+  var inp=overlay.querySelector('[name=email]'),email=inp?inp.value.trim():'';
+  if(!email){authMsg('Впиши почту выше, и на неё придёт ссылка для нового пароля.');if(inp)inp.focus();return}
+  if(!cloud.api){authMsg('Облако ещё не подключилось. Проверь интернет.');return}
+  authEmail=email;
+  cloud.api.reset(email).then(function(){
+    authMsg('Если эта почта зарегистрирована, на неё придёт письмо со ссылкой. Проверь и папку «Спам».',true);
+  },function(err){authMsg(authErrText(err))});
+}
+function doSignOut(){
+  var go=function(){closeModal();if(cloud.api)cloud.api.signOut().then(function(){toast('Выход из аккаунта выполнен')},function(){toast('Не получилось выйти. Попробуй ещё раз.')})};
+  if(cloud.dirty||cloud.pushing){
+    askConfirm({title:'Выйти без синхронизации?',text:'Последние изменения ещё не отправились в облако. Если выйти сейчас, они пропадут.',ok:'Выйти',danger:true}).then(function(ok){if(ok)go();else openAccount()});
+  }else go();
+}
+
 /* ---------- actions ---------- */
-function completeTask(t,li){
-  if(busy[t.id])return;busy[t.id]=1;
+function completeTask(id,li){
+  if(busy[id])return;busy[id]=1;
   var finish=function(){
-    delete busy[t.id];
-    t.done=true;t.doneAt=Date.now();if(ui.editing===t.id)ui.editing=null;
+    delete busy[id];
+    var t=findTask(id);if(!t||t.done)return;
+    t.done=true;t.doneAt=now();touch(t);if(ui.editing===id)ui.editing=null;
     ui.animateTally=true;save();render();
-    toast('Сделано!',{label:'Вернуть',fn:function(){t.done=false;t.doneAt=null;save();render()}});
+    toast('Сделано!',{label:'Вернуть',fn:function(){var x=findTask(id);if(x){x.done=false;x.doneAt=null;touch(x);save();render()}}});
   };
   if(reduced||!li)finish();else{li.classList.add('striking');setTimeout(finish,480)}
 }
 function deleteTask(t){
   var idx=state.tasks.indexOf(t);if(idx<0)return;
-  state.tasks.splice(idx,1);if(ui.editing===t.id)ui.editing=null;
+  state.tasks.splice(idx,1);state.deleted.tasks[t.id]=now();
+  if(ui.editing===t.id)ui.editing=null;
   save();render();
-  toast('Задание удалено',{label:'Вернуть',fn:function(){state.tasks.splice(Math.min(idx,state.tasks.length),0,t);save();render()}});
+  toast('Задание удалено',{label:'Вернуть',fn:function(){
+    if(findTask(t.id))return;
+    delete state.deleted.tasks[t.id];touch(t);
+    if(t.subjectId!==PERSONAL&&!findSubject(t.subjectId))t.subjectId=PERSONAL;
+    state.tasks.push(t);save();render();
+  }});
 }
 
 document.addEventListener('click',function(e){
@@ -631,24 +986,24 @@ document.addEventListener('click',function(e){
   switch(act){
     case 'toggle-done':
       if(!t)break;
-      if(t.done){t.done=false;t.doneAt=null;save();render();toast('Задание снова в списке')}
-      else completeTask(t,a.closest('.task'));
+      if(t.done){t.done=false;t.doneAt=null;touch(t);save();render();toast('Задание снова в списке')}
+      else completeTask(t.id,a.closest('.task'));
       return;
     case 'cycle-prio':
-      if(!t)break;t.priority=t.priority===''?'high':t.priority==='high'?'low':'';save();render();
+      if(!t)break;t.priority=t.priority===''?'high':t.priority==='high'?'low':'';touch(t);save();render();
       var b=board.querySelector('.prio[data-id="'+t.id+'"]');if(b)b.focus({preventScroll:true});return;
     case 'set-prio':
-      if(!t)break;t.priority=t.priority===a.dataset.v?'':a.dataset.v;save();render();
+      if(!t)break;t.priority=t.priority===a.dataset.v?'':a.dataset.v;touch(t);save();render();
       var sb=board.querySelector('.seg-btn.'+a.dataset.v+'[data-id="'+t.id+'"]');if(sb)sb.focus({preventScroll:true});return;
     case 'edit':
       ui.editing=ui.editing===id?null:id;render();
       if(ui.editing){var ed=board.querySelector('.task[data-id="'+id+'"] .editor');if(ed&&ed.scrollIntoView)ed.scrollIntoView({block:'nearest',behavior:reduced?'auto':'smooth'})}
       return;
     case 'close-edit':
-      var cid=ui.editing;ui.editing=null;render();
+      var cid=ui.editing;ui.editing=null;save();render();
       var body=cid&&board.querySelector('.task-body[data-id="'+cid+'"]');if(body)body.focus({preventScroll:true});return;
     case 'clear-due':
-      if(!t)break;t.due='';save();render();return;
+      if(!t)break;t.due='';touch(t);save();render();return;
     case 'delete-task':
       if(t)deleteTask(t);return;
     case 'toggle-done-list':
@@ -660,17 +1015,22 @@ document.addEventListener('click',function(e){
     case 'move':
       var i=state.subjects.findIndex(function(s){return s.id===sid}),j=i+Number(a.dataset.dir);
       if(i<0||j<0||j>=state.subjects.length)break;
-      var tmp=state.subjects[i];state.subjects[i]=state.subjects[j];state.subjects[j]=tmp;
+      state.subjects.forEach(function(s,k){if(s.pos!==k){s.pos=k;touch(s)}});
+      var si=state.subjects[i],sj=state.subjects[j];
+      si.pos=j;sj.pos=i;touch(si);touch(sj);
+      state.subjects[i]=sj;state.subjects[j]=si;
       ui.menu=null;save();render();return;
     case 'delete-subject':
       ui.menu=null;render();
-      var s=state.subjects.filter(function(x){return x.id===sid})[0];if(!s)return;
+      var s=findSubject(sid);if(!s)return;
       var ts=state.tasks.filter(function(x){return x.subjectId===sid}),dn=ts.filter(function(x){return x.done}).length;
       var text=ts.length?'Вместе с ней удалятся '+ts.length+' '+plural(ts.length,'задание','задания','заданий')+(dn?', из них '+dn+' '+plural(dn,'сделанное','сделанных','сделанных')+', и они пропадут из итогов семестра.':'.'):'В ней нет заданий.';
       askConfirm({title:'Удалить «'+s.name+'»?',text:text,ok:'Удалить',danger:true}).then(function(ok){
         if(!ok)return;
+        var t0=now();
         state.subjects=state.subjects.filter(function(x){return x.id!==sid});
-        state.tasks=state.tasks.filter(function(x){return x.subjectId!==sid});
+        state.deleted.subjects[sid]=t0;
+        state.tasks=state.tasks.filter(function(x){if(x.subjectId===sid){state.deleted.tasks[x.id]=t0;return false}return true});
         save();render();toast('Дисциплина «'+s.name+'» удалена');
       });
       return;
@@ -680,15 +1040,23 @@ document.addEventListener('click',function(e){
       ui.addingSubject=false;render();return;
     case 'open-stats':openStats();break;
     case 'open-backup':openBackup();break;
+    case 'open-account':
+      if(cloud.user)openAccount();
+      else if(cloud.api)openAuth('in');
+      else if(cloud.loadFailed){toast('Подключаюсь к облаку…');initCloud()}
+      else toast('Облако ещё подключается, подожди пару секунд.');
+      break;
+    case 'auth-mode':
+      var em=overlay.querySelector('[name=email]');if(em)authEmail=em.value.trim();
+      openAuth(a.dataset.mode);break;
+    case 'auth-reset':sendReset();break;
+    case 'sync-now':if(cloud.user){cloud.dirty=true;pushNow()}break;
+    case 'sign-out':doSignOut();break;
     case 'end-semester':endSemester();break;
     case 'close-modal':closeModal();break;
     case 'confirm-yes':case 'confirm-no':
       var r=confirmResolver;confirmResolver=null;closeModal();if(r)r(act==='confirm-yes');break;
-    case 'download':
-      if(!downloadsCap){downloadFile();break}
-      downloadsCap.save({filename:'domashka-'+todayStr()+'.json',data:exportCode()}).then(function(){toast('Файл копии сохранён')},function(err){
-        if(err&&err.code==='declined')return;toast('Скачать не получилось. Скопируй код копии вместо файла.')});
-      break;
+    case 'download':downloadFile();break;
     case 'copy':copyCode();break;
     case 'pick-file':var fi=$('#import-file');if(fi)fi.click();break;
     case 'restore':restore();break;
@@ -701,36 +1069,45 @@ document.addEventListener('submit',function(e){
   var kind=f.dataset.form;
   if(kind==='add-task'){
     var inp=f.querySelector('input'),v=inp.value.trim();if(!v)return;
-    state.tasks.push({id:uid(),subjectId:f.dataset.sid,text:v,note:'',due:'',priority:'',done:false,doneAt:null,createdAt:Date.now()});
+    var t0=now();
+    state.tasks.push({id:uid(),subjectId:f.dataset.sid,text:v.slice(0,500),note:'',due:'',priority:'',done:false,doneAt:null,createdAt:t0,updatedAt:t0});
     inp.value='';ui.focusAdd=f.dataset.sid;save();render();
   }else if(kind==='add-subject'){
     var ni=$('#new-subject'),name=ni?ni.value.trim():'';if(!name){if(ni)ni.focus();return}
-    state.subjects.push({id:uid(),name:name.slice(0,80)});
+    var maxPos=state.subjects.reduce(function(m,s){return Math.max(m,s.pos)},-1);
+    state.subjects.push({id:uid(),name:name.slice(0,80),pos:maxPos+1,updatedAt:now()});
     ni.value='';ui.addingSubject=true;ui.focusSel='#new-subject';save();render();
     toast('Добавлено: '+name);
   }else if(kind==='rename'){
     commitRename(f.dataset.sid,f.querySelector('input').value);
+  }else if(kind==='auth'){
+    submitAuth(f);
   }
 });
 function commitRename(sid,val){
   if(ui.renaming!==sid)return;
-  var s=state.subjects.filter(function(x){return x.id===sid})[0];
+  var s=findSubject(sid);
   ui.renaming=null;
-  if(s&&val.trim()){s.name=val.trim().slice(0,80);save()}
+  if(s&&val.trim()&&val.trim()!==s.name){s.name=val.trim().slice(0,80);touch(s);save()}
   render();
 }
 document.addEventListener('focusout',function(e){
   var f=e.target.closest&&e.target.closest('form[data-form="rename"]');
-  if(f&&e.target.tagName==='INPUT'&&!(e.relatedTarget&&f.contains(e.relatedTarget)))commitRename(f.dataset.sid,e.target.value);
+  if(!f||e.target.tagName!=='INPUT'||(e.relatedTarget&&f.contains(e.relatedTarget)))return;
+  var sid=f.dataset.sid,val=e.target.value;
+  setTimeout(function(){if(document.activeElement&&f.contains(document.activeElement))return;commitRename(sid,val)},0);
 });
 document.addEventListener('input',function(e){
   var el=e.target,field=el.dataset&&el.dataset.field;if(!field)return;
   var t=findTask(el.dataset.id);if(!t)return;
-  if(field==='text'){if(el.value.trim()){t.text=el.value.slice(0,500);saveSoon()}}
-  else if(field==='note'){t.note=el.value;saveSoon()}
+  if(field==='text'){if(el.value.trim()){t.text=el.value.slice(0,500);touch(t);saveSoon()}}
+  else if(field==='note'){t.note=el.value;touch(t);saveSoon()}
 });
 document.addEventListener('change',function(e){
   var el=e.target;
+  if(el.matches&&el.matches('[data-toggle-pw]')){
+    var pw=el.closest('form')&&el.closest('form').querySelector('[name=password]');if(pw)pw.type=el.checked?'text':'password';return;
+  }
   if(el.id==='import-file'){
     var file=el.files&&el.files[0];if(!file)return;
     var rd=new FileReader();
@@ -740,8 +1117,8 @@ document.addEventListener('change',function(e){
   }
   var field=el.dataset&&el.dataset.field;if(!field)return;
   var t=findTask(el.dataset.id);if(!t)return;
-  if(field==='due'){t.due=/^\d{4}-\d{2}-\d{2}$/.test(el.value)?el.value:'';save();render()}
-  else if(field==='subject'){t.subjectId=el.value;save();render();
+  if(field==='due'){t.due=/^\d{4}-\d{2}-\d{2}$/.test(el.value)?el.value:'';touch(t);save();render()}
+  else if(field==='subject'){t.subjectId=el.value;touch(t);save();render();
     var ed=board.querySelector('.task[data-id="'+t.id+'"]');if(ed&&ed.scrollIntoView)ed.scrollIntoView({block:'nearest',behavior:reduced?'auto':'smooth'})}
   else if(field==='text'&&!el.value.trim()){el.value=t.text}
 });
@@ -750,26 +1127,34 @@ document.addEventListener('keydown',function(e){
     if(!overlay.hidden){dismissModal();return}
     if(ui.menu){var ms=ui.menu;ui.menu=null;render();var mb=board.querySelector('[data-action="menu"][data-sid="'+ms+'"]');if(mb)mb.focus();return}
     if(ui.renaming){ui.renaming=null;render();return}
-    if(ui.editing){var id=ui.editing;ui.editing=null;render();var tb=board.querySelector('.task-body[data-id="'+id+'"]');if(tb)tb.focus();return}
+    if(ui.editing){var id=ui.editing;ui.editing=null;save();render();var tb=board.querySelector('.task-body[data-id="'+id+'"]');if(tb)tb.focus();return}
     if(ui.addingSubject&&state.subjects.length){ui.addingSubject=false;render();return}
     return;
   }
   var el=e.target;
   if((e.key==='Enter'||e.key===' ')&&el.getAttribute&&el.getAttribute('role')==='button'&&el.dataset.action){e.preventDefault();el.click()}
 });
-window.addEventListener('storage',function(e){if(e.key===KEY){state=load();render()}});
-document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden')save()});
-window.addEventListener('pagehide',save);
+window.addEventListener('storage',function(e){
+  if(e.key!==currentKey||!e.newValue)return;
+  try{var other=normalize(JSON.parse(e.newValue));var before=JSON.stringify(state);state=mergeStates(state,other);if(JSON.stringify(state)!==before)render()}catch(err){}
+});
+window.addEventListener('online',function(){
+  if(!cloud.enabled)return;
+  if(!cloud.api&&cloud.loadFailed){initCloud();return}
+  if(cloud.user&&cloud.dirty)pushNow();
+});
+window.addEventListener('offline',function(){if(cloud.user)setStatus('offline')});
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState==='hidden')save();
+  else if(cloud.user&&cloud.dirty&&!cloud.pushing)pushNow();
+});
+window.addEventListener('pagehide',function(){persistLocal()});
 
 render();
+initCloud();
 
 if('serviceWorker' in navigator&&location.protocol==='https:'){
   window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){})});
-}
-if(window.claude&&typeof window.claude.use==='function'){
-  window.claude.use('downloads').then(function(d){
-    downloadsCap=d||null;
-  }).catch(function(){});
 }
 })();
 </script>
