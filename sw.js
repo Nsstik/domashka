@@ -1,6 +1,7 @@
-// Офлайн-режим: сначала берём свежую версию из сети, без интернета отдаём сохранённую.
-const CACHE = 'domashka-v1';
-const ASSETS = ['./', './index.html', './manifest.webmanifest', './favicon.svg',
+// Офлайн-режим: страницу сайта берём из сети, а без интернета отдаём сохранённую копию.
+// Запросы к облаку (вход, база данных) не трогаем, ими управляет Firebase.
+const CACHE = 'domashka-v2';
+const ASSETS = ['./', './index.html', './firebase-config.js', './manifest.webmanifest', './favicon.svg',
   './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
@@ -15,17 +16,30 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+function put(req, res) {
+  const copy = res.clone();
+  caches.open(CACHE).then((c) => c.put(req, copy));
+  return res;
+}
+
 self.addEventListener('fetch', (e) => {
-  if (e.request.method !== 'GET') return;
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+  const sameOrigin = url.origin === self.location.origin;
+  // Библиотеки Firebase и шрифты версионированы и не меняются: берём из кэша, если уже скачаны.
+  const immutable = (url.hostname === 'www.gstatic.com' && url.pathname.startsWith('/firebasejs/')) ||
+    url.hostname === 'fonts.gstatic.com';
+  const fontsCss = url.hostname === 'fonts.googleapis.com';
+  if (!sameOrigin && !immutable && !fontsCss) return;
+
+  if (immutable) {
+    e.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((res) => (res.ok || res.type === 'opaque') ? put(req, res) : res)));
+    return;
+  }
   e.respondWith(
-    fetch(e.request)
-      .then((res) => {
-        if (res && (res.ok || res.type === 'opaque')) {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(e.request, copy));
-        }
-        return res;
-      })
-      .catch(() => caches.match(e.request).then((hit) => hit || caches.match('./index.html')))
+    fetch(req)
+      .then((res) => (res.ok || res.type === 'opaque') ? put(req, res) : res)
+      .catch(() => caches.match(req).then((hit) => hit || (sameOrigin ? caches.match('./index.html') : Response.error())))
   );
 });
